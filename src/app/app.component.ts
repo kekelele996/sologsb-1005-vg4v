@@ -10,7 +10,7 @@ import { BadgeModule } from 'primeng/badge'
 import { DialogModule } from 'primeng/dialog'
 import { TooltipModule } from 'primeng/tooltip'
 import { Subscription } from 'rxjs'
-import type { Annotation, Claim, Feature, Role, ValidationIssue, WorkbenchState } from './models'
+import type { Annotation, Claim, Feature, ReportItemStatus, Role, SearchReport, ValidationIssue, WorkbenchState } from './models'
 import { WorkbenchService } from './workbench.service'
 
 @Component({
@@ -27,6 +27,8 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
   compareA = ''
   compareB = ''
   annotationDraft = ''
+  reportDraft = ''
+  reportMessage = ''
   versionDialog = false
   versionName = ''
   activeIssue: ValidationIssue | null = null
@@ -70,6 +72,8 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
   get warningCount(): number { return this.issues.filter(item => item.severity === 'warning').length }
   get canEditMainData(): boolean { return this.state.role !== 'viewer' }
   get mappedFeatureCount(): number { return this.claimFeatures.filter(feature => feature.supportIds.length > 0).length }
+  get featureConclusions() { return this.selectedFeature ? this.state.conclusions.filter(item => item.featureId === this.selectedFeature?.id) : [] }
+  get pendingConclusionCount(): number { return this.state.conclusions.filter(item => item.status === 'pending').length }
 
   claimLabel(id: string): string { return this.state.claims.find(item => item.id === id)?.title || '未命名权利要求' }
   featureLabel(id: string): string { return this.state.features.find(item => item.id === id)?.label || id }
@@ -133,6 +137,36 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
       const after = b.claims.find(item => item.id === id)?.text || ''
       return { label: `权利要求 ${a.claims.find(item => item.id === id)?.number || b.claims.find(item => item.id === id)?.number || '?'}`, before, after, changed: before !== after }
     })
+  }
+
+  receiveReport(): void {
+    const result = this.service.receiveReport(this.reportDraft)
+    this.reportMessage = result.message
+    if (result.ok) this.reportDraft = ''
+  }
+
+  fillSampleReport(): void {
+    this.reportDraft = this.service.sampleReportJson()
+    this.reportMessage = ''
+  }
+
+  applyReport(reportId: string): void {
+    const result = this.service.applyReport(reportId)
+    this.reportMessage = result.failed
+      ? `合并完成：${result.matched} 项成功，${result.failed} 项失败已单独回滚，修正数据后可只重试失败项。`
+      : `合并完成：${result.matched} 个权利要求项已合并，比对结论已生效。`
+  }
+
+  applyLabel(report: SearchReport): string {
+    return report.items.some(item => item.status === 'failed') ? '重试失败项' : '合并报告'
+  }
+
+  reportFullyApplied(report: SearchReport): boolean {
+    return report.items.every(item => item.status === 'matched')
+  }
+
+  itemStatusLabel(status: ReportItemStatus): string {
+    return ({ pending: '待合并', matched: '已合并', failed: '已回滚' })[status]
   }
 
   exportFile(type: 'json' | 'csv'): void {

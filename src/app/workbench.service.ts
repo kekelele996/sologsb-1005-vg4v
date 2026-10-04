@@ -1,6 +1,6 @@
 import { Injectable, OnDestroy } from '@angular/core'
 import { BehaviorSubject, map, type Observable } from 'rxjs'
-import type { Annotation, Claim, ClaimVersion, Feature, Paragraph, Position, Role, ValidationIssue, WorkbenchState } from './models'
+import type { Annotation, Claim, ClaimReportItem, ClaimVersion, ComparisonConclusion, Feature, Paragraph, Position, Role, SearchReport, ValidationIssue, WorkbenchState } from './models'
 
 const STORAGE_KEY = 'patent-claim-mapping-workbench-v1'
 const POSITION_KEY = 'patent-claim-mapping-position-v1'
@@ -33,6 +33,7 @@ function demoState(): WorkbenchState {
   return {
     claims: initialClaims, paragraphs: initialParagraphs, features: initialFeatures,
     annotations: initialAnnotations, orphanMappings: [], versions: [],
+    reports: [], conclusions: [],
     role: 'author', currentUserRole: 'author', selectedClaimId: 'claim-1', selectedFeatureId: 'feature-b', activeTab: 'mapping'
   }
 }
@@ -147,7 +148,10 @@ export class WorkbenchService implements OnDestroy {
     if (this.stateSubject.value.role === 'viewer') return
     this.commit(state => {
       const feature = state.features.find(item => item.id === id)
-      if (feature) Object.assign(feature, patch)
+      if (!feature) return
+      Object.assign(feature, patch)
+      const protectedKeys: Array<keyof Feature> = ['label', 'text', 'parentId', 'referenceIds', 'supportIds']
+      if (Object.keys(patch).some(key => protectedKeys.includes(key as keyof Feature))) this.markConclusionsPending(state, id)
     })
   }
 
@@ -166,6 +170,7 @@ export class WorkbenchService implements OnDestroy {
         if (item.parentId === id) item.parentId = null
       })
       state.annotations = state.annotations.filter(item => item.featureId !== id)
+      state.conclusions = state.conclusions.filter(item => item.featureId !== id)
       state.selectedFeatureId = state.features.find(item => item.claimId === state.selectedClaimId)?.id || null
     })
   }
@@ -179,6 +184,7 @@ export class WorkbenchService implements OnDestroy {
       if (index >= 0) feature.supportIds.splice(index, 1)
       else feature.supportIds.push(paragraphId)
       state.orphanMappings = state.orphanMappings.filter(item => item.paragraphId !== paragraphId)
+      this.markConclusionsPending(state, featureId)
     })
   }
 
@@ -225,9 +231,87 @@ export class WorkbenchService implements OnDestroy {
       if (!version) return
       state.claims = clone(version.claims)
       state.features = clone(version.features)
+      state.conclusions.forEach(conclusion => {
+        if (conclusion.status === 'confirmed') { conclusion.status = 'pending'; conclusion.updatedAt = new Date().toISOString() }
+      })
       if (!state.claims.some(claim => claim.id === state.selectedClaimId)) state.selectedClaimId = state.claims[0]?.id || ''
       state.selectedFeatureId = state.features.find(feature => feature.claimId === state.selectedClaimId)?.id || null
     })
+  }
+
+  receiveReport(rawText: string): { ok: boolean; message: string } {
+    let parsed: { name?: unknown; source?: unknown; items?: unknown }
+    try { parsed = JSON.parse(rawText) } catch { return { ok: false, message: '报告 JSON 无法解析，请检查格式。' } }
+    if (!parsed || !Array.isArray(parsed.items) || !parsed.items.length) return { ok: false, message: '报告缺少按权利要求项组织的 items 列表。' }
+    const state = this.stateSubject.value
+    const items = (parsed.items as Array<Record<string, unknown>>).map(item => this.normalizeReportItem(state, item))
+    const report: SearchReport = {
+      id: `report-${Date.now()}`,
+      name: String(parsed.name || `检索报告 ${new Date().toLocaleString('zh-CN', { hour12: false })}`),
+      source: String(parsed.source || '检索机构'),
+      receivedAt: new Date().toISOString(),
+      appliedAt: null,
+      items
+    }
+    this.commit(next => { next.reports.unshift(report) })
+    return { ok: true, message: `已接收《${report.name}》，共 ${items.length} 个权利要求项；旧报告只带段号的引用已按说明书补出段落号，工作台数据保持原样。` }
+  }
+
+  applyReport(reportId: string): { matched: number; failed: number } {
+    const result = { matched: 0, failed: 0 }
+    this.commit(state => {
+      const report = state.reports.find(item => item.id === reportId)
+      if (!report) return
+      for (const item of report.items) {
+        if (item.status === 'matched') continue
+        const addedConclusionIds: string[] = []
+        try {
+          this.applyReportItem(state, report, item, addedConclusionIds)
+          item.status = 'matched'
+          item.error = undefined
+          result.matched++
+        } catch (error) {
+          state.conclusions = state.conclusions.filter(conclusion => !addedConclusionIds.includes(conclusion.id))
+          item.status = 'failed'
+          item.error = error instanceof Error ? error.message : String(error)
+          result.failed++
+        }
+      }
+      if (report.items.every(item => item.status === 'matched')) report.appliedAt = new Date().toISOString()
+    })
+    return result
+  }
+
+  confirmConclusion(id: string): void {
+    this.commit(state => {
+      const conclusion = state.conclusions.find(item => item.id === id)
+      if (conclusion) { conclusion.status = 'confirmed'; conclusion.updatedAt = new Date().toISOString() }
+    })
+  }
+
+  sampleReportJson(): string {
+    return JSON.stringify({
+      name: '检索比对报告 2026-09-30',
+      source: '检索机构 · 宏知检索',
+      items: [
+        {
+          claimNumber: 1,
+          features: [
+            { featureId: 'feature-b', text: '检索方改写：传感模块', parentId: null, referenceIds: ['feature-c'], supportRefs: ['[0012]'] },
+            { featureId: 'feature-d', supportRefs: ['[0024]', '[0040]'] }
+          ],
+          conclusions: [
+            { featureId: 'feature-b', verdict: '未被对比文件公开', citedRefs: ['[0018]'], note: 'D1 仅公开并列布置，未公开对角线布置以外的采集方式差异。' },
+            { featureId: 'feature-d', verdict: '部分公开', citedRefs: ['[0024]', '[0040]'], note: 'D2 公开了湿度调节，未公开分级调节策略。' }
+          ]
+        },
+        {
+          claimNumber: 2,
+          features: [{ featureId: 'feature-e', supportRefs: ['[0018]', '[0099]'] }],
+          conclusions: [{ featureId: 'feature-e', verdict: '未被对比文件公开', citedRefs: ['[0099]'], note: '引用补充段落 [0099] 佐证对角线布置效果。' }]
+        }
+      ]
+    }, null, 2)
   }
 
   undo(): void {
@@ -284,7 +368,91 @@ export class WorkbenchService implements OnDestroy {
       if (this.hasReferenceCycle(feature, state.features)) issues.push({ id: `cycle-${feature.id}`, severity: 'error', type: 'cycle', featureId: feature.id, title: `${feature.label} 存在循环引用`, detail: '特征层级或引用关系形成闭环，请移除其中一条关系。' })
     }
     state.orphanMappings.forEach(item => issues.push({ id: item.id, severity: 'warning', type: 'orphan-mapping', title: '存在待清理映射', detail: item.reason }))
+    state.conclusions.filter(item => item.status === 'pending').forEach(conclusion => {
+      const feature = state.features.find(item => item.id === conclusion.featureId)
+      issues.push({
+        id: `pending-${conclusion.id}`, severity: 'warning', type: 'pending-conclusion', featureId: conclusion.featureId,
+        title: `比对结论待核：${feature?.label || conclusion.featureId}`,
+        detail: '该特征在检索结论给出后被修改，结论已退回待核，请核对后重新确认。'
+      })
+    })
     return issues
+  }
+
+  private normalizeReportItem(state: WorkbenchState, raw: Record<string, unknown>): ClaimReportItem {
+    const claimNumber = Number(raw['claimNumber']) || 0
+    const refs = (value: unknown): string[] => Array.isArray(value) ? value.map(ref => this.resolveParagraphRef(state, String(ref)) || String(ref)) : []
+    const features = (Array.isArray(raw['features']) ? raw['features'] : []) as Array<Record<string, unknown>>
+    const conclusions = (Array.isArray(raw['conclusions']) ? raw['conclusions'] : []) as Array<Record<string, unknown>>
+    return {
+      claimId: state.claims.find(claim => claim.number === claimNumber)?.id || null,
+      claimNumber,
+      status: 'pending',
+      features: features.map(entry => ({
+        featureId: String(entry['featureId'] || ''),
+        text: typeof entry['text'] === 'string' ? entry['text'] : undefined,
+        parentId: typeof entry['parentId'] === 'string' ? entry['parentId'] : entry['parentId'] === null ? null : undefined,
+        referenceIds: Array.isArray(entry['referenceIds']) ? entry['referenceIds'].map(String) : undefined,
+        supportRefs: refs(entry['supportRefs'])
+      })),
+      conclusions: conclusions.map(entry => ({
+        featureId: String(entry['featureId'] || ''),
+        verdict: String(entry['verdict'] || '待核'),
+        citedRefs: refs(entry['citedRefs']),
+        note: String(entry['note'] || '')
+      }))
+    }
+  }
+
+  private applyReportItem(state: WorkbenchState, report: SearchReport, item: ClaimReportItem, addedConclusionIds: string[]): void {
+    const claim = state.claims.find(entry => entry.id === item.claimId)
+    if (!claim) throw new Error(`未找到权利要求 ${item.claimNumber}，请先录入该权利要求。`)
+    const claimFeature = (featureId: string): Feature => {
+      const feature = state.features.find(entry => entry.id === featureId && entry.claimId === claim.id)
+      if (!feature) throw new Error(`权利要求 ${claim.number} 中不存在特征 ${featureId}。`)
+      return feature
+    }
+    const requireParagraph = (ref: string): string => {
+      const resolved = this.resolveParagraphRef(state, ref)
+      if (!resolved) throw new Error(`段号 ${ref} 无法对应说明书段落，请先补录该段落。`)
+      return resolved
+    }
+    // 报告中的特征正文、层级、引用和支持段落仅留档在报告副本，不写回工作台特征。
+    for (const entry of item.features) {
+      claimFeature(entry.featureId)
+      entry.supportRefs = entry.supportRefs.map(ref => requireParagraph(ref))
+    }
+    for (const entry of item.conclusions) {
+      const feature = claimFeature(entry.featureId)
+      const citedParagraphIds = entry.citedRefs.map(ref => requireParagraph(ref))
+      entry.citedRefs = citedParagraphIds
+      const now = new Date().toISOString()
+      const conclusion: ComparisonConclusion = {
+        id: `conclusion-${Date.now()}-${addedConclusionIds.length}`,
+        reportId: report.id, claimId: claim.id, featureId: feature.id,
+        verdict: entry.verdict, citedParagraphIds, note: entry.note,
+        status: 'confirmed', createdAt: now, updatedAt: now
+      }
+      state.conclusions.push(conclusion)
+      addedConclusionIds.push(conclusion.id)
+    }
+  }
+
+  private resolveParagraphRef(state: WorkbenchState, ref: string): string | null {
+    const trimmed = ref.trim()
+    if (state.paragraphs.some(paragraph => paragraph.id === trimmed)) return trimmed
+    const digits = trimmed.replace(/\D/g, '')
+    if (!digits) return null
+    return state.paragraphs.find(paragraph => paragraph.section.replace(/\D/g, '') === digits)?.id || null
+  }
+
+  private markConclusionsPending(state: WorkbenchState, featureId: string): void {
+    state.conclusions.forEach(conclusion => {
+      if (conclusion.featureId === featureId && conclusion.status === 'confirmed') {
+        conclusion.status = 'pending'
+        conclusion.updatedAt = new Date().toISOString()
+      }
+    })
   }
 
   private hasReferenceCycle(start: Feature, features: Feature[]): boolean {

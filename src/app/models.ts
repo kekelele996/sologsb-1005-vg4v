@@ -49,6 +49,56 @@ export interface ClaimVersion {
   features: Feature[]
 }
 
+export type ConclusionStatus = 'confirmed' | 'pending'
+
+export interface ComparisonConclusion {
+  id: string
+  reportId: string
+  claimId: string
+  featureId: string
+  verdict: string
+  citedParagraphIds: string[]
+  note: string
+  status: ConclusionStatus
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ReportFeatureEntry {
+  featureId: string
+  text?: string
+  parentId?: string | null
+  referenceIds?: string[]
+  supportRefs: string[]
+}
+
+export interface ReportConclusionEntry {
+  featureId: string
+  verdict: string
+  citedRefs: string[]
+  note: string
+}
+
+export type ReportItemStatus = 'pending' | 'matched' | 'failed'
+
+export interface ClaimReportItem {
+  claimId: string | null
+  claimNumber: number
+  status: ReportItemStatus
+  error?: string
+  features: ReportFeatureEntry[]
+  conclusions: ReportConclusionEntry[]
+}
+
+export interface SearchReport {
+  id: string
+  name: string
+  source: string
+  receivedAt: string
+  appliedAt: string | null
+  items: ClaimReportItem[]
+}
+
 export interface Position {
   tab: string
   claimId: string
@@ -63,6 +113,8 @@ export interface WorkbenchState {
   annotations: Annotation[]
   orphanMappings: OrphanMapping[]
   versions: ClaimVersion[]
+  reports: SearchReport[]
+  conclusions: ComparisonConclusion[]
   role: Role
   selectedClaimId: string
   selectedFeatureId: string | null
@@ -73,7 +125,7 @@ export interface WorkbenchState {
 export interface ValidationIssue {
   id: string
   severity: 'error' | 'warning'
-  type: 'cycle' | 'missing-support' | 'orphan-mapping' | 'empty-feature'
+  type: 'cycle' | 'missing-support' | 'orphan-mapping' | 'empty-feature' | 'pending-conclusion'
   featureId?: string
   title: string
   detail: string

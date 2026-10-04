@@ -55,6 +55,7 @@
       <nav class="tabs" aria-label="工作台视图">
         <button [class.active]="state.activeTab === 'mapping'" (click)="service.setTab('mapping')"><i class="pi pi-sitemap"></i>特征映射</button>
         <button [class.active]="state.activeTab === 'claim'" (click)="service.setTab('claim')"><i class="pi pi-file-edit"></i>权利要求录入</button>
+        <button [class.active]="state.activeTab === 'reports'" (click)="service.setTab('reports')"><i class="pi pi-inbox"></i>检索报告</button>
         <button [class.active]="state.activeTab === 'compare'" (click)="service.setTab('compare')"><i class="pi pi-arrows-h"></i>版本比较</button>
         <button [class.active]="state.activeTab === 'audit'" (click)="service.setTab('audit')"><i class="pi pi-check-square"></i>核对清单</button>
       </nav>
@@ -159,6 +160,59 @@
         </section>
       </div>
 
+      <div class="view" *ngIf="state.activeTab === 'reports'">
+        <section class="panel report-panel">
+          <div class="panel-heading">
+            <span>接收检索报告</span>
+            <span class="heading-actions">
+              <p-button label="填入示例报告" icon="pi pi-file" size="small" [outlined]="true" (onClick)="fillSampleReport()" />
+              <p-button label="接收报告" icon="pi pi-inbox" size="small" [disabled]="!reportDraft.trim()" (onClick)="receiveReport()" />
+            </span>
+          </div>
+          <p class="hint">报告按权利要求项合并：只写入比对结论，代理人填写的特征正文、层级、引用和支持段落不会被报告值覆盖；检索机构早先只带段号的报告，接收时会按段号补出段落号。报告原文留档，与工作台各存一份。</p>
+          <textarea pTextarea rows="9" [(ngModel)]="reportDraft" placeholder="粘贴检索机构返回的报告 JSON…"></textarea>
+          <p class="report-message" *ngIf="reportMessage"><i class="pi pi-info-circle"></i>{{ reportMessage }}</p>
+        </section>
+
+        <section class="panel report-panel" *ngFor="let report of state.reports">
+          <div class="panel-heading">
+            <span>{{ report.name }}</span>
+            <span class="heading-actions">
+              <small class="report-meta">{{ report.source }} · 接收于 {{ report.receivedAt | date:'MM-dd HH:mm' }}</small>
+              <p-button [label]="applyLabel(report)" icon="pi pi-check" size="small" [disabled]="reportFullyApplied(report)" (onClick)="applyReport(report.id)" />
+            </span>
+          </div>
+          <div class="report-items">
+            <div class="report-item" *ngFor="let item of report.items" [class.matched]="item.status === 'matched'" [class.failed]="item.status === 'failed'">
+              <span class="claim-number">{{ item.claimNumber }}</span>
+              <div>
+                <strong>权利要求 {{ item.claimNumber }}</strong>
+                <small>{{ item.features.length }} 条特征记录 · {{ item.conclusions.length }} 条比对结论</small>
+                <small class="item-error" *ngIf="item.error">{{ item.error }}</small>
+              </div>
+              <span class="status-chip" [class.ready]="item.status === 'matched'" [class.error-chip]="item.status === 'failed'">{{ itemStatusLabel(item.status) }}</span>
+            </div>
+          </div>
+        </section>
+        <div class="panel empty-state large" *ngIf="!state.reports.length">尚未接收检索报告。</div>
+
+        <section class="panel report-panel" *ngIf="state.conclusions.length">
+          <div class="panel-heading">
+            <span>比对结论</span>
+            <p-badge *ngIf="pendingConclusionCount" [value]="pendingConclusionCount + ' 项待核'" severity="warn" />
+          </div>
+          <div class="conclusion-row" *ngFor="let conclusion of state.conclusions">
+            <div>
+              <strong>{{ featureLabel(conclusion.featureId) }} · {{ conclusion.verdict }}</strong>
+              <small>对比文件段落：<span class="cited-para" *ngFor="let id of conclusion.citedParagraphIds">{{ paragraphLabel(id) }}</span></small>
+              <small *ngIf="conclusion.note">{{ conclusion.note }}</small>
+            </div>
+            <span class="status-chip" [class.ready]="conclusion.status === 'confirmed'">{{ conclusion.status === 'confirmed' ? '已确认' : '待核' }}</span>
+            <p-button *ngIf="conclusion.status === 'pending'" label="确认" icon="pi pi-check" size="small" (onClick)="service.confirmConclusion(conclusion.id)" />
+          </div>
+        </section>
+      </div>
+
       <div class="view" *ngIf="state.activeTab === 'compare'">
         <section class="panel compare-panel">
           <div class="panel-heading"><span>权利要求版本比较</span><p-button label="保存当前版本" icon="pi pi-save" (onClick)="versionDialog = true" /></div>
@@ -219,6 +273,12 @@
           <strong>支持映射</strong>
           <span *ngFor="let id of feature.supportIds">{{ paragraphLabel(id) }}</span>
           <em *ngIf="!feature.supportIds.length">尚未选择说明书段落</em>
+        </div>
+        <div class="quick-map" *ngIf="featureConclusions.length">
+          <strong>比对结论</strong>
+          <span *ngFor="let conclusion of featureConclusions" [class.pending]="conclusion.status === 'pending'">
+            {{ conclusion.verdict }} · {{ conclusion.status === 'pending' ? '待核' : '已确认' }}
+          </span>
         </div>
       </section>
       <ng-template #noSelection><section class="panel empty-state">选择技术特征查看映射详情。</section></ng-template>
