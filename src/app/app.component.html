@@ -55,6 +55,7 @@
       <nav class="tabs" aria-label="工作台视图">
         <button [class.active]="state.activeTab === 'mapping'" (click)="service.setTab('mapping')"><i class="pi pi-sitemap"></i>特征映射</button>
         <button [class.active]="state.activeTab === 'claim'" (click)="service.setTab('claim')"><i class="pi pi-file-edit"></i>权利要求录入</button>
+        <button [class.active]="state.activeTab === 'report'" (click)="service.setTab('report')"><i class="pi pi-inbox"></i>检索报告<span class="tab-badge" *ngIf="state.reports.length">{{ state.reports.length }}</span></button>
         <button [class.active]="state.activeTab === 'compare'" (click)="service.setTab('compare')"><i class="pi pi-arrows-h"></i>版本比较</button>
         <button [class.active]="state.activeTab === 'audit'" (click)="service.setTab('audit')"><i class="pi pi-check-square"></i>核对清单</button>
       </nav>
@@ -67,6 +68,7 @@
               <button *ngFor="let feature of claimFeatures; let i = index" type="button" class="feature-item" [class.selected]="feature.id === state.selectedFeatureId" [style.--depth]="feature.parentId ? 1 : 0" (click)="service.selectFeature(feature.id)">
                 <span class="feature-index">{{ feature.label.split('·')[0].trim() }}</span>
                 <span><strong>{{ feature.label }}</strong><small>{{ feature.text || '尚未填写特征内容' }}</small></span>
+                <i class="pi pi-circle-fill pending-dot" *ngIf="featureHasPending(feature)" pTooltip="有比对结论待核"></i>
                 <i class="pi pi-chevron-right"></i>
               </button>
               <div *ngIf="!claimFeatures.length" class="empty-state">尚未拆分技术特征</div>
@@ -159,6 +161,78 @@
         </section>
       </div>
 
+      <div class="view" *ngIf="state.activeTab === 'report'">
+        <div class="report-grid">
+          <section class="panel ref-docs-panel">
+            <div class="panel-heading"><span>对比文件库</span><p-badge [value]="state.referenceDocuments.length + ' 篇'" severity="secondary" /></div>
+            <article *ngFor="let doc of state.referenceDocuments" class="ref-doc-card">
+              <header><strong>{{ doc.code }}</strong><small>{{ doc.title }}</small></header>
+              <div class="ref-para-row" *ngFor="let para of doc.paragraphs">
+                <span class="ordinal">段号 {{ para.ordinal }}</span>
+                <i class="pi pi-arrow-right"></i>
+                <span class="paragraph-no">{{ para.paragraphNo }}</span>
+                <p>{{ para.text }}</p>
+              </div>
+            </article>
+            <p class="hint">早先检索机构发回的报告只带段号（顺序号），接收时按段号补出段落号。</p>
+          </section>
+
+          <section class="panel receive-panel">
+            <div class="panel-heading"><span>接收检索报告</span></div>
+            <p class="hint">检索机构发回的比对结果按权利要求项逐项接收：代理人已填的特征正文、层级、引用和支持段落不会被报告覆盖；某一项比对失败只回滚该项，成功项保留，之后可只重试失败的那几项。</p>
+            <textarea pTextarea rows="8" [(ngModel)]="rawReportText" placeholder="粘贴检索报告 JSON，或点击“模拟检索机构发回报告”"></textarea>
+            <div class="button-row">
+              <p-button label="模拟检索机构发回报告" icon="pi pi-send" [outlined]="true" (onClick)="loadSampleReport()"></p-button>
+              <p-button label="接收报告" icon="pi pi-download" (onClick)="receiveReport()"></p-button>
+            </div>
+            <p *ngIf="receiveError" class="receive-error"><i class="pi pi-times-circle"></i>{{ receiveError }}</p>
+            <div *ngIf="receiveSummary" class="receive-summary">
+              <span class="status-chip ready">成功 {{ receiveSummary.success }} 项</span>
+              <span class="status-chip" [class.error-chip]="receiveSummary.failed">{{ receiveSummary.failed ? '失败 ' + receiveSummary.failed + ' 项（可重试）' : '全部接收成功' }}</span>
+            </div>
+          </section>
+        </div>
+
+        <section class="panel reports-panel">
+          <div class="panel-heading"><span>检索报告与比对结论</span></div>
+          <article *ngFor="let report of state.reports" class="report-card">
+            <header class="report-header">
+              <div><strong>{{ report.agency }}</strong><small>收到于 {{ report.receivedAt | date:'yyyy-MM-dd HH:mm' }}</small></div>
+              <div class="report-counts">
+                <span class="status-chip ready">成功 {{ successCount(report) }} 项</span>
+                <span class="status-chip" [class.error-chip]="failedCount(report)">失败 {{ failedCount(report) }} 项</span>
+                <span class="status-chip" *ngIf="reportPendingCount(report)"><i class="pi pi-clock"></i>{{ reportPendingCount(report) }} 项待核</span>
+                <p-button *ngIf="failedCount(report)" label="重试失败项" icon="pi pi-refresh" size="small" (onClick)="service.retryFailedItems(report.id)"></p-button>
+              </div>
+            </header>
+            <div class="report-item" *ngFor="let item of report.items; let itemIndex = index">
+              <header>
+                <span class="claim-number">{{ item.claimNumber }}</span>
+                <strong>权利要求 {{ item.claimNumber }}</strong>
+                <span class="status-chip" [class.ready]="item.status === 'success'" [class.error-chip]="item.status === 'failed'">{{ item.status === 'success' ? '已接收' : '接收失败' }}</span>
+                <span class="pending-chip" *ngIf="pendingCount(item)"><i class="pi pi-clock"></i>{{ pendingCount(item) }} 项结论待核</span>
+              </header>
+              <p *ngIf="item.error" class="item-error"><i class="pi pi-exclamation-triangle"></i>{{ item.error }}</p>
+              <div class="result-list" *ngIf="item.status === 'success'">
+                <div class="result-row" *ngFor="let result of item.results" [class.pending]="result.status === 'pending'">
+                  <div class="result-main">
+                    <strong>{{ result.featureLabel }}</strong>
+                    <span class="doc-ref">{{ result.referenceDocumentCode }} · 段号 {{ result.paragraphOrdinal ?? '—' }} <i class="pi pi-arrow-right"></i> <em>{{ result.paragraphNo || '未补出段落号' }}</em><span class="resolved-tag" *ngIf="result.paragraphResolved">按段号补出</span></span>
+                  </div>
+                  <span class="conclusion-chip" [class]="conclusionSeverity(result.conclusion)">{{ conclusionLabel(result.conclusion) }}</span>
+                  <span class="status-chip" [class.ready]="result.status === 'confirmed'" [class.error-chip]="result.status === 'pending'">{{ result.status === 'confirmed' ? '已确认' : '待核' }}</span>
+                  <p-button *ngIf="result.status === 'pending'" label="确认结论" size="small" [text]="true" (onClick)="service.confirmResult(report.id, itemIndex, result.id)"></p-button>
+                  <p class="stale-reason" *ngIf="result.status === 'pending' && result.staleReason"><i class="pi pi-info-circle"></i>{{ result.staleReason }}</p>
+                </div>
+                <div *ngIf="!item.results.length" class="empty-state">该项无比对结论。</div>
+              </div>
+            </div>
+            <div *ngIf="!report.items.length" class="empty-state">报告中没有权利要求项。</div>
+          </article>
+          <div *ngIf="!state.reports.length" class="empty-state large">尚未接收检索报告。</div>
+        </section>
+      </div>
+
       <div class="view" *ngIf="state.activeTab === 'compare'">
         <section class="panel compare-panel">
           <div class="panel-heading"><span>权利要求版本比较</span><p-button label="保存当前版本" icon="pi pi-save" (onClick)="versionDialog = true" /></div>
@@ -219,6 +293,14 @@
           <strong>支持映射</strong>
           <span *ngFor="let id of feature.supportIds">{{ paragraphLabel(id) }}</span>
           <em *ngIf="!feature.supportIds.length">尚未选择说明书段落</em>
+        </div>
+        <div class="feature-results" *ngIf="featureResults(feature).length">
+          <strong>比对结论</strong>
+          <div class="result-row compact" *ngFor="let row of featureResults(feature)" [class.pending]="row.result.status === 'pending'">
+            <span>{{ row.result.referenceDocumentCode }} · {{ row.result.paragraphNo || '段号 ' + row.result.paragraphOrdinal }}</span>
+            <span class="conclusion-chip" [class]="conclusionSeverity(row.result.conclusion)">{{ conclusionLabel(row.result.conclusion) }}</span>
+            <span class="status-chip" [class.ready]="row.result.status === 'confirmed'" [class.error-chip]="row.result.status === 'pending'">{{ row.result.status === 'confirmed' ? '已确认' : '待核' }}</span>
+          </div>
         </div>
       </section>
       <ng-template #noSelection><section class="panel empty-state">选择技术特征查看映射详情。</section></ng-template>

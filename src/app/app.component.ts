@@ -10,7 +10,7 @@ import { BadgeModule } from 'primeng/badge'
 import { DialogModule } from 'primeng/dialog'
 import { TooltipModule } from 'primeng/tooltip'
 import { Subscription } from 'rxjs'
-import type { Annotation, Claim, Feature, Role, ValidationIssue, WorkbenchState } from './models'
+import type { Annotation, Claim, ComparisonConclusion, Feature, ReportClaimItem, Role, SearchReport, ValidationIssue, WorkbenchState } from './models'
 import { WorkbenchService } from './workbench.service'
 
 @Component({
@@ -30,6 +30,9 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
   versionDialog = false
   versionName = ''
   activeIssue: ValidationIssue | null = null
+  rawReportText = ''
+  receiveSummary: { success: number; failed: number } | null = null
+  receiveError = ''
   roleOptions: Array<{ label: string; value: Role }> = [
     { label: '代理人（可编辑主数据与本人批注）', value: 'author' },
     { label: '审查员（可编辑本人批注）', value: 'examiner' },
@@ -153,6 +156,50 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   closeIssue(): void { this.activeIssue = null }
+
+  loadSampleReport(): void {
+    this.rawReportText = JSON.stringify(this.service.sampleRawReport(), null, 2)
+    this.receiveError = ''
+  }
+
+  receiveReport(): void {
+    this.receiveError = ''
+    let parsed: unknown
+    try { parsed = JSON.parse(this.rawReportText) } catch {
+      this.receiveError = '报告内容不是合法的 JSON，请检查后重试。'
+      return
+    }
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as { items?: unknown }).items)) {
+      this.receiveError = '报告格式不正确，至少需要包含 items 权利要求项数组。'
+      return
+    }
+    this.receiveSummary = this.service.receiveReport(parsed as Parameters<WorkbenchService['receiveReport']>[0])
+  }
+
+  successCount(report: SearchReport): number { return report.items.filter(item => item.status === 'success').length }
+  failedCount(report: SearchReport): number { return report.items.filter(item => item.status === 'failed').length }
+  pendingCount(item: ReportClaimItem): number { return item.results.filter(result => result.status === 'pending').length }
+  reportPendingCount(report: SearchReport): number { return report.items.reduce((sum, item) => sum + this.pendingCount(item), 0) }
+
+  featureResults(feature: Feature): Array<{ report: SearchReport; item: ReportClaimItem; result: import('./models').ComparisonResult }> {
+    const rows: Array<{ report: SearchReport; item: ReportClaimItem; result: import('./models').ComparisonResult }> = []
+    for (const report of this.state.reports) {
+      for (const item of report.items) {
+        if (item.status !== 'success') continue
+        for (const result of item.results) if (result.featureId === feature.id) rows.push({ report, item, result })
+      }
+    }
+    return rows
+  }
+
+  featureHasPending(feature: Feature): boolean { return this.featureResults(feature).some(row => row.result.status === 'pending') }
+
+  conclusionLabel(conclusion: ComparisonConclusion): string {
+    return ({ identical: '相同', similar: '相近', different: '区别' })[conclusion]
+  }
+  conclusionSeverity(conclusion: ComparisonConclusion): string {
+    return ({ identical: 'conclusion-identical', similar: 'conclusion-similar', different: 'conclusion-different' })[conclusion]
+  }
 
   private syncVersions(): void {
     if (!this.state.versions.some(item => item.id === this.compareA)) this.compareA = this.state.versions[1]?.id || this.state.versions[0]?.id || ''
